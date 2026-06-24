@@ -1,5 +1,7 @@
 # Claude Subagent Skill for Codex
 
+[简体中文](./README.zh-CN.md)
+
 Use local Claude CLI as a read-only Codex subagent for second-opinion reviews, code exploration, and same-session grilling.
 
 This repository is a Codex skill folder. Clone it directly into your skills directory so `SKILL.md`, `agents/`, and `scripts/` stay at the repository root.
@@ -99,6 +101,10 @@ node --test scripts/claude-agent.test.mjs
 node --check scripts/claude-agent.mjs
 python3 /path/to/quick_validate.py .
 ```
+
+## References and inspiration
+
+- [chaseai-yt/grill-me-codex](https://github.com/chaseai-yt/grill-me-codex) — inspiration for cross-model review/grilling loops. This project applies the inverse control model: Codex remains the controller, while Claude CLI acts as a bounded read-only reviewer/explorer.
 
 ## License
 
