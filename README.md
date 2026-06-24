@@ -1,0 +1,105 @@
+# Claude Subagent Skill for Codex
+
+Use local Claude CLI as a read-only Codex subagent for second-opinion reviews, code exploration, and same-session grilling.
+
+This repository is a Codex skill folder. Clone it directly into your skills directory so `SKILL.md`, `agents/`, and `scripts/` stay at the repository root.
+
+## Features
+
+- `submit -> await -> result` workflow for long Claude jobs.
+- `review-working-tree` covers `git status`, unstaged diff, staged diff, and safe small untracked text files.
+- `stream-json` observability: events, tool counts, heartbeat, and result readiness are written to `.claude-runs/<run-id>/status.json`.
+- `cancel <run-id>` terminates recorded `claudePid`, worker `pid`, and `workerPid`.
+- Raw `stdout.log` has a byte cap while the stream parser still receives full stdout.
+- Claude tools are constrained for reviews/exploration; Claude `Skill` is denied by default to avoid hidden token-heavy skill loads.
+
+## Requirements
+
+- Node.js 22+
+- Claude CLI available as `claude`
+- Git for diff/working-tree review modes
+
+## Install
+
+```bash
+mkdir -p ~/.agents/skills
+git clone https://github.com/Cooperhgp/claude-subagent-skill.git ~/.agents/skills/claude-subagent
+```
+
+If you use a different Codex skills directory, clone this repository as a folder named `claude-subagent`.
+
+## Quick start
+
+```bash
+SCRIPT="$HOME/.agents/skills/claude-subagent/scripts/claude-agent.mjs"
+
+node "$SCRIPT" --cwd /path/to/project doctor
+
+node "$SCRIPT" --cwd /path/to/project submit review-working-tree
+node "$SCRIPT" --cwd /path/to/project await <run-id>
+node "$SCRIPT" --cwd /path/to/project result <run-id>
+```
+
+## Common commands
+
+```bash
+# Review
+node "$SCRIPT" --cwd /path/to/project submit review-working-tree
+node "$SCRIPT" --cwd /path/to/project submit review-diff
+node "$SCRIPT" --cwd /path/to/project submit review-file path/to/file
+node "$SCRIPT" --cwd /path/to/project submit review-plan path/to/plan.md
+
+# Explore
+node "$SCRIPT" --cwd /path/to/project submit explore "where is X implemented?"
+
+# Same-session grill
+node "$SCRIPT" --cwd /path/to/project submit grill-plan plan.md --round 1
+node "$SCRIPT" --cwd /path/to/project submit grill-plan plan.md --round 2 --resume-from <previous-run-id>
+
+# Inspect
+node "$SCRIPT" --cwd /path/to/project list
+node "$SCRIPT" --cwd /path/to/project status <run-id>
+node "$SCRIPT" --cwd /path/to/project tail <run-id> --lines 80
+node "$SCRIPT" --cwd /path/to/project verdict <run-id>
+
+# Cancel
+node "$SCRIPT" --cwd /path/to/project cancel <run-id>
+```
+
+Review commands deliberately reject bare `--wait` to avoid tying up Codex tool calls on large reviews. Use `submit -> await -> result`. For tiny smoke tests only, pass `--wait --wait-ok`.
+
+## Configuration
+
+Environment variables:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CLAUDE_AGENT_RUNS_DIR` | `.claude-runs` | Run state directory under `--cwd`. |
+| `CLAUDE_AGENT_CLAUDE_BIN` | `claude` | Claude CLI binary. |
+| `CLAUDE_AGENT_NODE_BIN` | current Node | Node binary for detached workers. |
+| `CLAUDE_AGENT_READ_TOOLS` | `Read,Grep,Glob,LS` | Tools allowed for explore/grill. |
+| `CLAUDE_AGENT_DISALLOWED_TOOLS` | `Skill` | Tools denied for all Claude invocations. |
+| `CLAUDE_AGENT_UNTRACKED_MAX_BYTES` | `65536` | Max bytes per untracked text file in `review-working-tree`. |
+| `CLAUDE_AGENT_STDOUT_LOG_MAX_BYTES` | `1048576` | Max raw `stdout.log` bytes before truncation. |
+
+## Safety model
+
+- `--cwd` is the security boundary.
+- Run IDs must match a strict generated pattern.
+- `.claude-runs` must resolve inside `--cwd`; unsafe symlinks are rejected.
+- Review modes disable Claude tools.
+- Explore/grill modes allow only configured read tools and deny Claude `Skill` by default.
+- Claude output is a signal, not ground truth; verify important findings against source/tests.
+- Do not delegate commits, pushes, deploys, migrations, billing/auth changes, destructive commands, or secret handling automatically.
+
+## Development
+
+```bash
+node --test scripts/claude-agent.test.mjs
+node --check scripts/claude-agent.mjs
+python3 /path/to/quick_validate.py .
+```
+
+## License
+
+MIT

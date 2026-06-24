@@ -1,0 +1,4 @@
+interface:
+  display_name: "Claude Subagent"
+  short_description: "Claude CLI reviews and explorers"
+  default_prompt: "Use $claude-subagent as a read-only Claude CLI reviewer/explorer in the target project; prefer submit -> await -> result for long reviews."
