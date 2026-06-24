@@ -10,10 +10,14 @@ Use local Claude CLI as an external read-only reviewer/interviewer while Codex s
 Natural language triggers:
 
 - “用 Claude explore/探索这块代码”
+- “用 Claude review/评审当前改动/diff/working tree”
 - “用 Claude review/评审这个文件/文档/方案”
+- “请 Claude 给这个方案/代码做 second opinion/二审”
 - “用 Claude review 当前 diff/改动”
 - “让 Claude 连续质询/挑战这个方案”
+- “继续上一轮 Claude grill/质询”
 - “看一下 Claude 子代理进度/结果”
+- “取消刚才那个 Claude review/子代理任务”
 
 ## Review vs Grill
 

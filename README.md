@@ -15,6 +15,26 @@ This repository is a Codex skill folder. Clone it directly into your skills dire
 - Raw `stdout.log` has a byte cap while the stream parser still receives full stdout.
 - Claude tools are constrained for reviews/exploration; Claude `Skill` is denied by default to avoid hidden token-heavy skill loads.
 
+## Natural language invocation
+
+After installation, users do not need to type the runner commands directly. In Codex, ask for Claude naturally; Codex should load this skill and translate the request into `submit -> await -> result`.
+
+Examples:
+
+| User says | Typical mode |
+| --- | --- |
+| "Use Claude to review the current changes." | `review-working-tree` |
+| "Ask Claude for a second opinion on this diff." | `review-working-tree` or `review-diff` |
+| "Use Claude to review `docs/plan.md`." | `review-plan` or `review-file` |
+| "Have Claude explore where login is implemented." | `explore` |
+| "Let Claude challenge/grill this architecture plan." | `grill-plan` |
+| "Continue the Claude grill from the previous run." | `grill-* --resume-from` |
+| "Check the Claude subagent progress." | `status` / `await` |
+| "Show me the Claude review result." | `result` |
+| "Cancel that Claude review." | `cancel` |
+
+Chinese examples also work, such as: "用 Claude 评审当前改动", "让 Claude explore 登录流程", "让 Claude 连续质询这个方案", "看一下 Claude 子代理进度", "取消刚才的 Claude 任务".
+
 ## Requirements
 
 - Node.js 22+

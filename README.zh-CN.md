@@ -23,6 +23,26 @@
 - `stdout.log` 有大小上限；即使原始日志被截断，stream-json parser 仍接收完整 stdout。
 - 默认禁用 Claude `Skill` 工具，避免 Claude 在评审中自动加载大体量 skill 文档造成隐藏 token 消耗。
 
+## 用户怎么用自然语言调用
+
+安装后，用户通常不需要手写 runner 命令。直接在 Codex 里自然语言说“让 Claude 做某事”即可，Codex 会加载这个 skill，并转换成 `submit -> await -> result` 的后台任务流程。
+
+示例：
+
+| 用户可以这样说 | 通常对应模式 |
+| --- | --- |
+| “用 Claude 评审当前改动。” | `review-working-tree` |
+| “让 Claude review 一下这个 diff。” | `review-working-tree` 或 `review-diff` |
+| “用 Claude 评审 `docs/plan.md` 这个方案。” | `review-plan` 或 `review-file` |
+| “让 Claude explore 登录流程在哪里实现。” | `explore` |
+| “让 Claude 连续质询这个架构方案。” | `grill-plan` |
+| “继续上一轮 Claude 质询。” | `grill-* --resume-from` |
+| “看一下 Claude 子代理进度。” | `status` / `await` |
+| “把 Claude 评审结果给我。” | `result` |
+| “取消刚才那个 Claude 任务。” | `cancel` |
+
+英文也可以，例如："Use Claude to review the current changes", "Have Claude explore where login is implemented", "Let Claude grill this plan", "Check the Claude subagent progress".
+
 ## 环境要求
 
 - Node.js 22+
