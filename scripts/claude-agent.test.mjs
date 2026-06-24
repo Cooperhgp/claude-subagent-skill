@@ -231,6 +231,85 @@ process.stdin.on('end', () => {
   assert.match(fs.readFileSync(path.join(runDir, 'events.jsonl'), 'utf8'), /"type":"claude_result"/);
 });
 
+test('review runs persist Claude sessions by default so IDE history can show them', () => {
+  const workspace = makeTempWorkspace();
+  const argsLog = path.join(workspace, 'claude-args.json');
+  spawnSync('git', ['init', '-q'], { cwd: workspace, encoding: 'utf8' });
+  fs.writeFileSync(path.join(workspace, 'file.txt'), 'hello\n', 'utf8');
+
+  const fakeClaude = writeFakeClaude(
+    workspace,
+    `
+import fs from 'node:fs';
+fs.writeFileSync(${JSON.stringify(argsLog)}, JSON.stringify(process.argv.slice(2)));
+process.stdin.resume();
+process.stdin.on('end', () => {
+  process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'OK\\\\n', session_id: 'persist-session' }) + '\\n');
+});
+`,
+  );
+
+  const submit = runAgent(workspace, ['submit', 'review-diff', '--wait', '--wait-ok'], {
+    CLAUDE_AGENT_CLAUDE_BIN: fakeClaude,
+  });
+  assert.equal(submit.status, 0, submit.stderr);
+
+  const claudeArgs = JSON.parse(fs.readFileSync(argsLog, 'utf8'));
+  assert.doesNotMatch(claudeArgs.join(' '), /--no-session-persistence/);
+});
+
+test('review runs can opt out of Claude session history with --no-persist', () => {
+  const workspace = makeTempWorkspace();
+  const argsLog = path.join(workspace, 'claude-args.json');
+  spawnSync('git', ['init', '-q'], { cwd: workspace, encoding: 'utf8' });
+  fs.writeFileSync(path.join(workspace, 'file.txt'), 'hello\n', 'utf8');
+
+  const fakeClaude = writeFakeClaude(
+    workspace,
+    `
+import fs from 'node:fs';
+fs.writeFileSync(${JSON.stringify(argsLog)}, JSON.stringify(process.argv.slice(2)));
+process.stdin.resume();
+process.stdin.on('end', () => {
+  process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'OK\\\\n', session_id: 'no-persist-session' }) + '\\n');
+});
+`,
+  );
+
+  const submit = runAgent(workspace, ['submit', 'review-diff', '--no-persist', '--wait', '--wait-ok'], {
+    CLAUDE_AGENT_CLAUDE_BIN: fakeClaude,
+  });
+  assert.equal(submit.status, 0, submit.stderr);
+
+  const claudeArgs = JSON.parse(fs.readFileSync(argsLog, 'utf8'));
+  assert.ok(claudeArgs.includes('--no-session-persistence'));
+});
+
+test('explore can opt out of Claude session history with environment variable', () => {
+  const workspace = makeTempWorkspace();
+  const argsLog = path.join(workspace, 'claude-args.json');
+  const fakeClaude = writeFakeClaude(
+    workspace,
+    `
+import fs from 'node:fs';
+fs.writeFileSync(${JSON.stringify(argsLog)}, JSON.stringify(process.argv.slice(2)));
+process.stdin.resume();
+process.stdin.on('end', () => {
+  process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'OK\\\\n', session_id: 'env-no-persist-session' }) + '\\n');
+});
+`,
+  );
+
+  const submit = runAgent(workspace, ['submit', 'explore', 'inspect persistence', '--wait'], {
+    CLAUDE_AGENT_CLAUDE_BIN: fakeClaude,
+    CLAUDE_AGENT_NO_SESSION_PERSISTENCE: '1',
+  });
+  assert.equal(submit.status, 0, submit.stderr);
+
+  const claudeArgs = JSON.parse(fs.readFileSync(argsLog, 'utf8'));
+  assert.ok(claudeArgs.includes('--no-session-persistence'));
+});
+
 test('review-working-tree request includes unstaged, staged, and safe untracked files', () => {
   const workspace = makeTempWorkspace();
   spawnSync('git', ['init', '-q'], { cwd: workspace, encoding: 'utf8' });
@@ -431,6 +510,17 @@ test('rounds after the first require explicit resume session', () => {
 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /round > 1 requires --resume-from or --claude-session-id/);
+});
+
+test('grill runs reject --no-persist because session history is required for resume', () => {
+  const workspace = makeTempWorkspace();
+  const plan = path.join(workspace, 'PLAN.md');
+  fs.writeFileSync(plan, '# Plan\n', 'utf8');
+
+  const result = runAgent(workspace, ['submit', 'grill-plan', plan, '--no-persist']);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /--no-persist is only supported for review\/explore runs/);
 });
 
 test('debate rounds can reuse the same Claude session via --resume-from', () => {

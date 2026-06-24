@@ -48,6 +48,7 @@ If `node` is missing, use the project/runtime Node available in the environment.
 `--cwd` is the security boundary. File/log targets must resolve inside that cwd; run IDs are strict generated IDs only.
 Explore/grill default to `Read,Grep,Glob,LS`; opt into project MCP tools only when you know Claude MCP is configured and read-only, e.g. `CLAUDE_AGENT_READ_TOOLS='Read,Grep,Glob,LS,mcp__codebase-memory-mcp__*'`.
 Claude skills/slash commands are disabled by default and `Skill` is denied, because they can silently load large bundled docs and waste tokens during reviews.
+Review/explore runs keep Claude local session history by default so IDE integrations can show them. Use `--no-persist` or `CLAUDE_AGENT_NO_SESSION_PERSISTENCE=1` only for sensitive one-off review/explore runs. Do not use `--no-persist` with `grill-*`; same-session grilling requires persisted Claude sessions.
 
 Inspect jobs:
 
@@ -107,6 +108,7 @@ Rules:
 
 - Review modes disable Claude tools but still use `stream-json` for observable progress.
 - Grill/explore allow only read-oriented tools where available and disable Claude skills/slash commands to avoid hidden token spikes.
+- Review/explore keep Claude local session history by default; `--no-persist` is an explicit opt-out.
 - Inspect `status`, `events.jsonl`, and `tail` for progress instead of assuming a long silent run is stuck; use `cancel <run-id>` to stop a queued/running job.
 - `status.json` records `status`, `workerPid`, `pid`, `claudePid`, `heartbeatAt`, `claudeSessionId`, `resultReady`, event/tool counters, stdout log truncation fields, and final `verdict`.
 - Claude output is a signal, not ground truth. Codex must verify important claims against source/tests before acting.

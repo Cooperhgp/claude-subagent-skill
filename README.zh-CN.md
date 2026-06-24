@@ -21,6 +21,7 @@
 - `stream-json` 可观测性：事件数、工具调用数、heartbeat、结果状态都会写入 `.claude-runs/<run-id>/status.json`。
 - `cancel <run-id>`：停止记录到的 `claudePid`、worker `pid`、`workerPid`。
 - `stdout.log` 有大小上限；即使原始日志被截断，stream-json parser 仍接收完整 stdout。
+- review/explore 默认保留 Claude 本地会话历史，因此 VSCode Claude 插件这类 IDE 集成可以看到对应聊天记录。
 - 默认禁用 Claude `Skill` 工具，避免 Claude 在评审中自动加载大体量 skill 文档造成隐藏 token 消耗。
 
 ## 用户怎么用自然语言调用
@@ -108,6 +109,8 @@ result <run-id>
 
 只有很小的本地 smoke test 才建议显式使用 `--wait --wait-ok`。
 
+review/explore 默认会保留 Claude 本地会话历史。如果某次任务不想出现在 Claude 本地历史里，可以加 `--no-persist`，或者设置 `CLAUDE_AGENT_NO_SESSION_PERSISTENCE=1`。
+
 ## 配置项
 
 | 变量 | 默认值 | 说明 |
@@ -117,6 +120,7 @@ result <run-id>
 | `CLAUDE_AGENT_NODE_BIN` | 当前 Node | 后台 worker 使用的 Node。 |
 | `CLAUDE_AGENT_READ_TOOLS` | `Read,Grep,Glob,LS` | explore/grill 允许的只读工具。 |
 | `CLAUDE_AGENT_DISALLOWED_TOOLS` | `Skill` | 所有 Claude 调用默认禁用的工具。 |
+| `CLAUDE_AGENT_NO_SESSION_PERSISTENCE` | 未设置 | 设置为 `1`、`true`、`yes` 或 `on` 时，review/explore 不写入 Claude 本地历史。 |
 | `CLAUDE_AGENT_UNTRACKED_MAX_BYTES` | `65536` | `review-working-tree` 中单个 untracked 文本文件最大读取字节数。 |
 | `CLAUDE_AGENT_STDOUT_LOG_MAX_BYTES` | `1048576` | 原始 `stdout.log` 截断阈值。 |
 
@@ -127,6 +131,7 @@ result <run-id>
 - `.claude-runs` 必须解析到 `--cwd` 内部；危险 symlink 会被拒绝。
 - review 模式禁用 Claude 工具。
 - explore/grill 只允许配置的只读工具，并默认禁用 Claude `Skill`。
+- review/explore 默认保留 Claude 本地会话历史；敏感的一次性任务再使用 `--no-persist`。
 - Claude 输出只是信号，不是事实源；重要结论必须由 Codex 再读源码/跑测试确认。
 - 不要自动委托 Claude 做 commit、push、deploy、迁移、鉴权/计费改动、破坏性命令或密钥处理。
 

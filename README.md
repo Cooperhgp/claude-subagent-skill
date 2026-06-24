@@ -13,6 +13,7 @@ This repository is a Codex skill folder. Clone it directly into your skills dire
 - `stream-json` observability: events, tool counts, heartbeat, and result readiness are written to `.claude-runs/<run-id>/status.json`.
 - `cancel <run-id>` terminates recorded `claudePid`, worker `pid`, and `workerPid`.
 - Raw `stdout.log` has a byte cap while the stream parser still receives full stdout.
+- Review/explore runs keep Claude local session history by default, so IDE integrations such as the Claude VSCode plugin can show the conversations.
 - Claude tools are constrained for reviews/exploration; Claude `Skill` is denied by default to avoid hidden token-heavy skill loads.
 
 ## Natural language invocation
@@ -90,6 +91,8 @@ node "$SCRIPT" --cwd /path/to/project cancel <run-id>
 
 Review commands deliberately reject bare `--wait` to avoid tying up Codex tool calls on large reviews. Use `submit -> await -> result`. For tiny smoke tests only, pass `--wait --wait-ok`.
 
+Review and explore runs persist Claude local session history by default. If you want a one-off run that does not appear in Claude local history, pass `--no-persist` or set `CLAUDE_AGENT_NO_SESSION_PERSISTENCE=1`.
+
 ## Configuration
 
 Environment variables:
@@ -101,6 +104,7 @@ Environment variables:
 | `CLAUDE_AGENT_NODE_BIN` | current Node | Node binary for detached workers. |
 | `CLAUDE_AGENT_READ_TOOLS` | `Read,Grep,Glob,LS` | Tools allowed for explore/grill. |
 | `CLAUDE_AGENT_DISALLOWED_TOOLS` | `Skill` | Tools denied for all Claude invocations. |
+| `CLAUDE_AGENT_NO_SESSION_PERSISTENCE` | unset | Set to `1`, `true`, `yes`, or `on` to opt out of Claude local history for review/explore. |
 | `CLAUDE_AGENT_UNTRACKED_MAX_BYTES` | `65536` | Max bytes per untracked text file in `review-working-tree`. |
 | `CLAUDE_AGENT_STDOUT_LOG_MAX_BYTES` | `1048576` | Max raw `stdout.log` bytes before truncation. |
 
@@ -111,6 +115,7 @@ Environment variables:
 - `.claude-runs` must resolve inside `--cwd`; unsafe symlinks are rejected.
 - Review modes disable Claude tools.
 - Explore/grill modes allow only configured read tools and deny Claude `Skill` by default.
+- Review/explore persist Claude local session history by default; use `--no-persist` only for sensitive one-off runs.
 - Claude output is a signal, not ground truth; verify important findings against source/tests.
 - Do not delegate commits, pushes, deploys, migrations, billing/auth changes, destructive commands, or secret handling automatically.
 

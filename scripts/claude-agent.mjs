@@ -33,8 +33,8 @@ function usage(exitCode = 2) {
   claude-agent.mjs --cwd <project-dir> submit grill-plan <path> [--log <path>] [--round N] [--claude-session-id UUID|--resume-from RUN_ID] [--wait]
   claude-agent.mjs --cwd <project-dir> submit debate-diff [--log <path>] [--round N] [--claude-session-id UUID|--resume-from RUN_ID] [--wait]
   claude-agent.mjs --cwd <project-dir> submit debate-plan <path> [--log <path>] [--round N] [--claude-session-id UUID|--resume-from RUN_ID] [--wait]
-  claude-agent.mjs --cwd <project-dir> submit review-diff|review-working-tree|review-file|review-plan [--wait-ok]
-  claude-agent.mjs --cwd <project-dir> submit explore <question...> [--wait]
+  claude-agent.mjs --cwd <project-dir> submit review-diff|review-working-tree|review-file|review-plan [--wait-ok] [--no-persist]
+  claude-agent.mjs --cwd <project-dir> submit explore <question...> [--wait] [--no-persist]
   claude-agent.mjs --cwd <project-dir> status <run-id>
   claude-agent.mjs --cwd <project-dir> result <run-id>
   claude-agent.mjs --cwd <project-dir> verdict <run-id>
@@ -50,6 +50,7 @@ Environment:
   CLAUDE_AGENT_NODE_BIN       Override Node binary for detached worker
   CLAUDE_AGENT_READ_TOOLS     Override read-only tool allowlist (default: Read,Grep,Glob,LS)
   CLAUDE_AGENT_DISALLOWED_TOOLS  Extra Claude tools to deny (default: Skill)
+  CLAUDE_AGENT_NO_SESSION_PERSISTENCE  Set to 1/true/yes/on to opt out of Claude local session history for review/explore
   CLAUDE_AGENT_UNTRACKED_MAX_BYTES  Max bytes per untracked text file in review-working-tree
   CLAUDE_AGENT_STDOUT_LOG_MAX_BYTES Max raw stdout.log bytes before truncation
 `;
@@ -204,6 +205,14 @@ function envPositiveInteger(name, fallback) {
     throw new Error(`${name} must be a positive integer`);
   }
   return parsed;
+}
+
+function envFlag(name) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') {
+    return false;
+  }
+  return ['1', 'true', 'yes', 'on'].includes(String(raw).trim().toLowerCase());
 }
 
 function numberLines(content) {
@@ -423,6 +432,10 @@ function skillDisableArgs() {
   return args;
 }
 
+function sessionPersistenceArgs(noPersist = false) {
+  return noPersist ? ['--no-session-persistence'] : [];
+}
+
 function claudeInvocationFor(kind, payload = {}) {
   if (isGrillKind(kind)) {
     const round = payload.round || 1;
@@ -436,6 +449,7 @@ function claudeInvocationFor(kind, payload = {}) {
       ]),
       claudeSessionId,
       continuity: 'same-session',
+      sessionPersistence: 'enabled',
       sessionMode: payload.resumeFrom || round > 1 || payload.claudeSessionId ? 'resume' : 'start',
       resumeFrom: payload.resumeFrom,
       round,
@@ -445,27 +459,30 @@ function claudeInvocationFor(kind, payload = {}) {
   if (isReviewKind(kind)) {
     return {
       args: streamJsonArgs([
-        '--no-session-persistence',
+        ...sessionPersistenceArgs(payload.noPersist),
         '--tools',
         '',
       ]),
       continuity: 'single-call',
+      sessionPersistence: payload.noPersist ? 'disabled' : 'enabled',
     };
   }
 
   if (kind === 'explore') {
     return {
       args: streamJsonArgs([
-        '--no-session-persistence',
+        ...sessionPersistenceArgs(payload.noPersist),
         '--allowedTools',
         readOnlyTools(),
       ]),
       continuity: 'single-call',
+      sessionPersistence: payload.noPersist ? 'disabled' : 'enabled',
     };
   }
   return {
-    args: ['-p', '--no-session-persistence', ...skillDisableArgs(), '--output-format', 'text', '--tools', ''],
+    args: ['-p', ...sessionPersistenceArgs(payload.noPersist), ...skillDisableArgs(), '--output-format', 'text', '--tools', ''],
     continuity: 'single-call',
+    sessionPersistence: payload.noPersist ? 'disabled' : 'enabled',
   };
 }
 
@@ -590,7 +607,7 @@ function stripOptions(args, optionsWithValue = []) {
   const result = [];
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
-    if (arg === '--wait' || arg === '--wait-ok') {
+    if (arg === '--wait' || arg === '--wait-ok' || arg === '--no-persist') {
       continue;
     }
     if (optionsWithValue.includes(arg)) {
@@ -605,6 +622,7 @@ function stripOptions(args, optionsWithValue = []) {
 function parseSubmitArgs(args) {
   const wait = args.includes('--wait');
   const waitOk = args.includes('--wait-ok');
+  const noPersist = args.includes('--no-persist') || envFlag('CLAUDE_AGENT_NO_SESSION_PERSISTENCE');
   const round = Number.parseInt(optionValue(args, '--round', '1'), 10) || 1;
   const priorLog = readOptionalLog(args);
   const claudeSessionId = optionValue(args, '--claude-session-id');
@@ -629,6 +647,9 @@ function parseSubmitArgs(args) {
   if (isGrillKind(kind) && round > 1 && !effectiveClaudeSessionId) {
     throw new Error('round > 1 requires --resume-from or --claude-session-id');
   }
+  if (isGrillKind(kind) && noPersist) {
+    throw new Error('--no-persist is only supported for review/explore runs');
+  }
 
   if (kind === 'review-diff') {
     const diff = runCommand('git', ['diff', '--no-ext-diff', '--unified=3', '--no-color']);
@@ -637,12 +658,12 @@ function parseSubmitArgs(args) {
       process.exit(diff.status ?? 1);
     }
     validateReviewPreflight(wait, waitOk);
-    return { kind, wait, payload: { diff: diff.stdout || '' } };
+    return { kind, wait, payload: { diff: diff.stdout || '', noPersist } };
   }
 
   if (kind === 'review-working-tree') {
     validateReviewPreflight(wait, waitOk);
-    return { kind, wait, payload: buildWorkingTreePayload() };
+    return { kind, wait, payload: { ...buildWorkingTreePayload(), noPersist } };
   }
 
   if (kind === 'grill-diff' || kind === 'debate-diff') {
@@ -673,6 +694,7 @@ function parseSubmitArgs(args) {
         round,
         claudeSessionId: effectiveClaudeSessionId,
         resumeFrom,
+        noPersist,
       },
     };
   }
@@ -682,7 +704,7 @@ function parseSubmitArgs(args) {
     if (!question) {
       usage();
     }
-    return { kind, wait, payload: { question } };
+    return { kind, wait, payload: { question, noPersist } };
   }
 
   usage();
@@ -1062,6 +1084,7 @@ async function submit(args) {
     claudeSessionId: invocation.claudeSessionId,
     continuity: invocation.continuity,
     sessionMode: invocation.sessionMode,
+    sessionPersistence: invocation.sessionPersistence,
     resumeFrom: invocation.resumeFrom,
     round: invocation.round,
     outputFormat: invocation.args.includes('stream-json') ? 'stream-json' : 'text',
