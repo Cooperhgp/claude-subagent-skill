@@ -92,9 +92,10 @@ test('usage does not imply review commands support bare wait', () => {
   assert.equal(result.status, 2);
   assert.equal(result.stderr.includes('submit review-diff [--wait]'), false);
   assert.equal(result.stderr.includes('submit review-working-tree [--wait]'), false);
+  assert.equal(result.stderr.includes('submit review-commit [commit-ish] [--wait]'), false);
   assert.equal(result.stderr.includes('submit review-file <path> [--wait]'), false);
   assert.equal(result.stderr.includes('submit review-plan <path> [--wait]'), false);
-  assert.ok(result.stderr.includes('submit review-diff|review-working-tree|review-file|review-plan [--wait-ok] [--no-persist]'));
+  assert.ok(result.stderr.includes('submit review-diff|review-working-tree|review-commit|review-file|review-plan [--wait-ok] [--no-persist]'));
 });
 
 test('README documents Claude idle await configuration', () => {
@@ -491,6 +492,101 @@ process.stdin.on('end', () => {
   assert.match(request, /--- note\.txt ---\nnote\n/);
   assert.match(request, /--- large\.txt ---\n\[omitted: file exceeds 8 bytes\]/);
   assert.match(request, /--- binary\.bin ---\n\[omitted: binary file\]/);
+});
+
+test('review-commit request embeds the selected commit patch', () => {
+  const workspace = makeTempWorkspace();
+  spawnSync('git', ['init', '-q'], { cwd: workspace, encoding: 'utf8' });
+  fs.writeFileSync(path.join(workspace, 'file.txt'), 'base\n', 'utf8');
+  spawnSync('git', ['add', 'file.txt'], { cwd: workspace, encoding: 'utf8' });
+  spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-q', '-m', 'base'], { cwd: workspace, encoding: 'utf8' });
+  fs.writeFileSync(path.join(workspace, 'file.txt'), 'base\nreview me\n', 'utf8');
+  spawnSync('git', ['add', 'file.txt'], { cwd: workspace, encoding: 'utf8' });
+  spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-q', '-m', 'feature commit'], { cwd: workspace, encoding: 'utf8' });
+
+  const fakeClaude = writeFakeClaude(
+    workspace,
+    `
+process.stdin.resume();
+process.stdin.on('end', () => {
+  process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'OK\\\\n', session_id: 'commit-review-session' }) + '\\n');
+});
+`,
+  );
+
+  const submit = runAgent(workspace, ['submit', 'review-commit', 'HEAD', '--wait', '--wait-ok'], {
+    CLAUDE_AGENT_CLAUDE_BIN: fakeClaude,
+  });
+  assert.equal(submit.status, 0, submit.stderr);
+
+  const runId = firstRunId(workspace);
+  const request = fs.readFileSync(path.join(workspace, '.claude-runs', runId, 'request.md'), 'utf8');
+  assert.match(request, /任务：评审已提交的 git commit/);
+  assert.match(request, /Commit:/);
+  assert.match(request, /feature commit/);
+  assert.match(request, /```diff/);
+  assert.match(request, /\+review me/);
+});
+
+test('review-commit can compare HEAD against an explicit base ref', () => {
+  const workspace = makeTempWorkspace();
+  spawnSync('git', ['init', '-q'], { cwd: workspace, encoding: 'utf8' });
+  fs.writeFileSync(path.join(workspace, 'file.txt'), 'base\n', 'utf8');
+  spawnSync('git', ['add', 'file.txt'], { cwd: workspace, encoding: 'utf8' });
+  spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-q', '-m', 'base'], { cwd: workspace, encoding: 'utf8' });
+  const baseRef = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: workspace, encoding: 'utf8' }).stdout.trim();
+  fs.writeFileSync(path.join(workspace, 'file.txt'), 'base\none\n', 'utf8');
+  spawnSync('git', ['add', 'file.txt'], { cwd: workspace, encoding: 'utf8' });
+  spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-q', '-m', 'one'], { cwd: workspace, encoding: 'utf8' });
+  fs.writeFileSync(path.join(workspace, 'file.txt'), 'base\none\ntwo\n', 'utf8');
+  spawnSync('git', ['add', 'file.txt'], { cwd: workspace, encoding: 'utf8' });
+  spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-q', '-m', 'two'], { cwd: workspace, encoding: 'utf8' });
+
+  const fakeClaude = writeFakeClaude(
+    workspace,
+    `
+process.stdin.resume();
+process.stdin.on('end', () => {
+  process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'OK\\\\n', session_id: 'commit-base-review-session' }) + '\\n');
+});
+`,
+  );
+
+  const submit = runAgent(workspace, ['submit', 'review-commit', 'HEAD', '--base', baseRef, '--wait', '--wait-ok'], {
+    CLAUDE_AGENT_CLAUDE_BIN: fakeClaude,
+  });
+  assert.equal(submit.status, 0, submit.stderr);
+
+  const runId = firstRunId(workspace);
+  const request = fs.readFileSync(path.join(workspace, '.claude-runs', runId, 'request.md'), 'utf8');
+  assert.match(request, new RegExp(`Base: ${baseRef}`));
+  assert.match(request, /\+one/);
+  assert.match(request, /\+two/);
+});
+
+test('review-file rejects packets that reference a commit diff without embedding one', () => {
+  const workspace = makeTempWorkspace();
+  const target = path.join(workspace, 'packet.md');
+  fs.writeFileSync(target, [
+    '# Review Request',
+    '',
+    'Please review commit HEAD against the plan.',
+    '',
+    '## Diff to Review',
+    '',
+    'Please inspect the repository diff for HEAD^..HEAD directly.',
+    '',
+  ].join('\n'), 'utf8');
+  const fakeClaude = writeFakeClaude(workspace, "process.stdin.resume(); process.stdin.on('end', () => process.stdout.write('SHOULD_NOT_RUN\\n'));");
+
+  const result = runAgent(workspace, ['submit', 'review-file', target, '--wait', '--wait-ok'], {
+    CLAUDE_AGENT_CLAUDE_BIN: fakeClaude,
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /references a git diff or commit but does not embed a unified diff/);
+  assert.match(result.stderr, /review-commit/);
+  assert.doesNotMatch(result.stdout, /SHOULD_NOT_RUN/);
 });
 
 test('review requests demand concise blocker-first output', () => {

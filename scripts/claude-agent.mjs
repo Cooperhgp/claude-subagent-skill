@@ -28,13 +28,14 @@ function usage(exitCode = 2) {
   const text = `Usage:
   claude-agent.mjs --cwd <project-dir> submit review-diff [--wait-ok] [--no-persist]
   claude-agent.mjs --cwd <project-dir> submit review-working-tree [--wait-ok] [--no-persist]
+  claude-agent.mjs --cwd <project-dir> submit review-commit [commit-ish] [--base base-ish] [--wait-ok] [--no-persist]
   claude-agent.mjs --cwd <project-dir> submit review-file <path> [--wait-ok] [--no-persist]
   claude-agent.mjs --cwd <project-dir> submit review-plan <path> [--wait-ok] [--no-persist]
   claude-agent.mjs --cwd <project-dir> submit grill-diff [--log <path>] [--round N] [--claude-session-id UUID|--resume-from RUN_ID] [--wait]
   claude-agent.mjs --cwd <project-dir> submit grill-plan <path> [--log <path>] [--round N] [--claude-session-id UUID|--resume-from RUN_ID] [--wait]
   claude-agent.mjs --cwd <project-dir> submit debate-diff [--log <path>] [--round N] [--claude-session-id UUID|--resume-from RUN_ID] [--wait]
   claude-agent.mjs --cwd <project-dir> submit debate-plan <path> [--log <path>] [--round N] [--claude-session-id UUID|--resume-from RUN_ID] [--wait]
-  claude-agent.mjs --cwd <project-dir> submit review-diff|review-working-tree|review-file|review-plan [--wait-ok] [--no-persist]
+  claude-agent.mjs --cwd <project-dir> submit review-diff|review-working-tree|review-commit|review-file|review-plan [--wait-ok] [--no-persist]
   claude-agent.mjs --cwd <project-dir> submit explore <question...> [--wait] [--no-persist]
   claude-agent.mjs --cwd <project-dir> status <run-id>
   claude-agent.mjs --cwd <project-dir> result <run-id>
@@ -304,6 +305,37 @@ function buildRequest(kind, payload) {
     ].join('\n');
   }
 
+  if (kind === 'review-commit') {
+    const rangeLabel = payload.base ? `${payload.base}..${payload.commit}` : payload.commit;
+    return [
+      '你是独立代码评审 reviewer。请只做评审，不要修改任何文件，不要使用工具。',
+      '',
+      '任务：评审已提交的 git commit / commit range。',
+      '',
+      ...conciseReviewOutputRules([
+        '7. 重点检查这个已提交改动相对需求/上下文是否有高置信 blocker；不要要求自己再去读取仓库 diff。',
+      ]),
+      '',
+      `Commit: ${payload.commit}`,
+      payload.base ? `Base: ${payload.base}` : '',
+      `Range: ${rangeLabel}`,
+      '',
+      'Git status:',
+      '',
+      payload.status || '(git status 没有输出)',
+      '',
+      'Commit summary:',
+      '',
+      payload.summary || '(没有 commit summary)',
+      '',
+      'Unified diff:',
+      '',
+      '```diff',
+      payload.diff || '(没有 diff 输出)',
+      '```',
+    ].filter((line) => line !== '').join('\n');
+  }
+
   if (kind === 'review-file') {
     return [
       '你是独立文件评审 reviewer。请只基于下面带行号的文件内容做评审，不要修改任何文件，不要使用工具。',
@@ -421,7 +453,7 @@ function isGrillKind(kind) {
 }
 
 function isReviewKind(kind) {
-  return kind === 'review-diff' || kind === 'review-working-tree' || kind === 'review-file' || kind === 'review-plan';
+  return kind === 'review-diff' || kind === 'review-working-tree' || kind === 'review-commit' || kind === 'review-file' || kind === 'review-plan';
 }
 
 function streamJsonArgs(extraArgs = []) {
@@ -629,6 +661,44 @@ function buildWorkingTreePayload() {
   };
 }
 
+function revParse(ref, label) {
+  return requireGitCommand(['rev-parse', '--verify', `${ref}^{commit}`], label).trim();
+}
+
+function buildCommitPayload(commit = 'HEAD', base = null) {
+  const resolvedCommit = revParse(commit, `git rev-parse ${commit}`);
+  let summaryArgs = ['show', '--no-ext-diff', '--no-color', '--stat', '--format=medium'];
+  let diffArgs = ['show', '--no-ext-diff', '--no-color', '--format=medium', '--stat', '--patch', '--find-renames', '--find-copies'];
+  let resolvedBase = null;
+  if (base) {
+    resolvedBase = revParse(base, `git rev-parse ${base}`);
+    summaryArgs = ['log', '--no-ext-diff', '--no-color', '--stat', '--format=medium', `${resolvedBase}..${resolvedCommit}`];
+    diffArgs = ['diff', '--no-ext-diff', '--no-color', '--unified=3', '--find-renames', '--find-copies', `${resolvedBase}..${resolvedCommit}`];
+  }
+  return {
+    commit: resolvedCommit,
+    base: resolvedBase,
+    status: requireGitCommand(['status', '--porcelain=v1', '-uall'], 'git status'),
+    summary: requireGitCommand(summaryArgs, base ? 'git log commit range' : 'git show summary'),
+    diff: requireGitCommand(diffArgs, base ? 'git diff commit range' : 'git show commit patch'),
+  };
+}
+
+function reviewFileNeedsEmbeddedDiffGuard(content) {
+  const text = content.toLowerCase();
+  const referencesDiff = [
+    /inspect\s+the\s+repository\s+diff/,
+    /\bgit\s+(diff|show)\b/,
+    /\bhead\^?\.\.head\b/,
+    /\breview\s+commit\b/,
+    /\bcommit\s+diff\b/,
+  ].some((pattern) => pattern.test(text));
+  if (!referencesDiff) {
+    return false;
+  }
+  return !/```diff[\s\S]*?```/.test(content);
+}
+
 function stripOptions(args, optionsWithValue = []) {
   const result = [];
   for (let index = 0; index < args.length; index += 1) {
@@ -659,7 +729,7 @@ function parseSubmitArgs(args) {
   if (claudeSessionId && !UUID_PATTERN.test(claudeSessionId)) {
     throw new Error(`Invalid Claude session id: ${claudeSessionId}`);
   }
-  const filtered = stripOptions(args, ['--log', '--round', '--claude-session-id', '--resume-from']);
+  const filtered = stripOptions(args, ['--log', '--round', '--claude-session-id', '--resume-from', '--base']);
   const [kind, ...rest] = filtered;
 
   if (!kind) {
@@ -692,6 +762,13 @@ function parseSubmitArgs(args) {
     return { kind, wait, payload: { ...buildWorkingTreePayload(), noPersist } };
   }
 
+  if (kind === 'review-commit') {
+    validateReviewPreflight(wait, waitOk);
+    const commit = rest[0] || 'HEAD';
+    const base = optionValue(args, '--base');
+    return { kind, wait, payload: { ...buildCommitPayload(commit, base), noPersist } };
+  }
+
   if (kind === 'grill-diff' || kind === 'debate-diff') {
     const diff = runCommand('git', ['diff', '--no-ext-diff', '--unified=3', '--no-color']);
     if (diff.status !== 0) {
@@ -710,12 +787,16 @@ function parseSubmitArgs(args) {
     if ((kind === 'review-file' || kind === 'review-plan') && wait && !waitOk) {
       validateReviewPreflight(wait, waitOk);
     }
+    const content = fs.readFileSync(absolute, 'utf8');
+    if (kind === 'review-file' && reviewFileNeedsEmbeddedDiffGuard(content)) {
+      throw new Error('review-file packet references a git diff or commit but does not embed a unified diff; use review-commit or include a ```diff fenced patch');
+    }
     return {
       kind,
       wait,
       payload: {
         path: absolute,
-        content: fs.readFileSync(absolute, 'utf8'),
+        content,
         priorLog,
         round,
         claudeSessionId: effectiveClaudeSessionId,

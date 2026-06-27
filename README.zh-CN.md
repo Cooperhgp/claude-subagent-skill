@@ -18,6 +18,7 @@
 
 - `submit -> await -> result`：长任务后台执行，Codex 不需要在中间反复请求大模型。
 - `review-working-tree`：覆盖 `git status`、未暂存 diff、已暂存 diff，以及安全的小型 untracked 文本文件。
+- `review-commit`：自动内联已提交 commit/range 的 patch，避免让 Claude 去看它实际看不到的 diff。
 - `stream-json` 可观测性：事件数、工具调用数、heartbeat、结果状态都会写入 `.claude-runs/<run-id>/status.json`。
 - `cancel <run-id>`：停止记录到的 `claudePid`、worker `pid`、`workerPid`。
 - `stdout.log` 有大小上限；即使原始日志被截断，stream-json parser 仍接收完整 stdout。
@@ -34,6 +35,7 @@
 | --- | --- |
 | “用 Claude 评审当前改动。” | `review-working-tree` |
 | “让 Claude review 一下这个 diff。” | `review-working-tree` 或 `review-diff` |
+| “用 Claude 评审刚才那个 commit。” | `review-commit HEAD` |
 | “用 Claude 评审 `docs/plan.md` 这个方案。” | `review-plan` 或 `review-file` |
 | “让 Claude explore 登录流程在哪里实现。” | `explore` |
 | “让 Claude 连续质询这个架构方案。” | `grill-plan` |
@@ -71,7 +73,7 @@ node "$SCRIPT" --cwd /path/to/project await <run-id> --interval 30 --max-minutes
 node "$SCRIPT" --cwd /path/to/project result <run-id>
 ```
 
-小而干净的改动推荐用 `review-working-tree`；大 diff、工作区很乱、或只想评审某几处时，先生成一个简短 review packet，再用 `review-file`。如果 bounded `await` 提示 idle/timeout 但任务仍是 `running`，先看 `status`/`tail`；只有明确想停掉 Claude 时才取消。
+小而干净的未提交改动推荐用 `review-working-tree`；已提交改动用 `review-commit HEAD`，分支/range 评审用 `review-commit HEAD --base origin/main`，runner 会把 patch 内联进请求。大 diff、工作区很乱、或只想评审某几处时，先生成一个简短 review packet，再用 `review-file`；如果 packet 提到 `git diff`、`git show`、`HEAD^..HEAD` 或 commit，必须内联 fenced `diff`。如果 bounded `await` 提示 idle/timeout 但任务仍是 `running`，先看 `status`/`tail`；只有明确想停掉 Claude 时才取消。
 
 ## 常用命令
 
@@ -79,6 +81,8 @@ node "$SCRIPT" --cwd /path/to/project result <run-id>
 # 评审
 node "$SCRIPT" --cwd /path/to/project submit review-working-tree
 node "$SCRIPT" --cwd /path/to/project submit review-diff
+node "$SCRIPT" --cwd /path/to/project submit review-commit HEAD
+node "$SCRIPT" --cwd /path/to/project submit review-commit HEAD --base origin/main
 node "$SCRIPT" --cwd /path/to/project submit review-file path/to/file
 node "$SCRIPT" --cwd /path/to/project submit review-plan path/to/plan.md
 

@@ -10,6 +10,7 @@ This repository is a Codex skill folder. Clone it directly into your skills dire
 
 - `submit -> await -> result` workflow for long Claude jobs.
 - `review-working-tree` covers `git status`, unstaged diff, staged diff, and safe small untracked text files.
+- `review-commit` embeds committed patches automatically, avoiding review packets that ask Claude to inspect a diff it cannot see.
 - `stream-json` observability: events, tool counts, heartbeat, and result readiness are written to `.claude-runs/<run-id>/status.json`.
 - `cancel <run-id>` terminates recorded `claudePid`, worker `pid`, and `workerPid`.
 - Raw `stdout.log` has a byte cap while the stream parser still receives full stdout.
@@ -26,6 +27,7 @@ Examples:
 | --- | --- |
 | "Use Claude to review the current changes." | `review-working-tree` |
 | "Ask Claude for a second opinion on this diff." | `review-working-tree` or `review-diff` |
+| "Use Claude to review the last commit." | `review-commit HEAD` |
 | "Use Claude to review `docs/plan.md`." | `review-plan` or `review-file` |
 | "Have Claude explore where login is implemented." | `explore` |
 | "Let Claude challenge/grill this architecture plan." | `grill-plan` |
@@ -63,7 +65,7 @@ node "$SCRIPT" --cwd /path/to/project await <run-id> --interval 30 --max-minutes
 node "$SCRIPT" --cwd /path/to/project result <run-id>
 ```
 
-For large/noisy working trees, create a concise review packet and use `review-file` instead of repeatedly waiting on a broad review. If bounded `await` reports idle/timeout while the run is still `running`, inspect `status`/`tail` first; cancel only when you intentionally want to stop Claude.
+For already committed work, use `review-commit HEAD` or `review-commit HEAD --base origin/main`; it embeds the patch in the request. For large/noisy working trees, create a concise review packet and use `review-file` instead of repeatedly waiting on a broad review, but include any referenced unified diff in a fenced `diff` block. If bounded `await` reports idle/timeout while the run is still `running`, inspect `status`/`tail` first; cancel only when you intentionally want to stop Claude.
 
 ## Common commands
 
@@ -71,6 +73,8 @@ For large/noisy working trees, create a concise review packet and use `review-fi
 # Review
 node "$SCRIPT" --cwd /path/to/project submit review-working-tree
 node "$SCRIPT" --cwd /path/to/project submit review-diff
+node "$SCRIPT" --cwd /path/to/project submit review-commit HEAD
+node "$SCRIPT" --cwd /path/to/project submit review-commit HEAD --base origin/main
 node "$SCRIPT" --cwd /path/to/project submit review-file path/to/file
 node "$SCRIPT" --cwd /path/to/project submit review-plan path/to/plan.md
 

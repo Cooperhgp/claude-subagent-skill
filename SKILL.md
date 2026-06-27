@@ -14,6 +14,7 @@ Natural language triggers:
 - “用 Claude review/评审这个文件/文档/方案”
 - “请 Claude 给这个方案/代码做 second opinion/二审”
 - “用 Claude review 当前 diff/改动”
+- “用 Claude review 刚才的 commit/已提交改动/HEAD”
 - “让 Claude 连续质询/挑战这个方案”
 - “继续上一轮 Claude grill/质询”
 - “看一下 Claude 子代理进度/结果”
@@ -36,6 +37,8 @@ SCRIPT="$HOME/.agents/skills/claude-subagent/scripts/claude-agent.mjs"
 node "$SCRIPT" --cwd /path/to/project doctor
 node "$SCRIPT" --cwd /path/to/project submit review-working-tree
 node "$SCRIPT" --cwd /path/to/project submit review-diff
+node "$SCRIPT" --cwd /path/to/project submit review-commit HEAD
+node "$SCRIPT" --cwd /path/to/project submit review-commit HEAD --base origin/main
 node "$SCRIPT" --cwd /path/to/project submit review-file path/to/file
 node "$SCRIPT" --cwd /path/to/project submit review-plan path/to/plan.md
 node "$SCRIPT" --cwd /path/to/project submit grill-plan path/to/plan.md --round 1
@@ -80,7 +83,7 @@ Do not cancel, shrink, or resubmit a Claude job before the first 25-minute await
 
 Default fast path:
 
-1. Scope first: prefer a generated `review-file` packet containing the exact diff/files/question over broad `review-working-tree` when the working tree is large, noisy, or includes unrelated user changes.
+1. Scope first: use `review-working-tree` for uncommitted work; use `review-commit` for already committed or merged work; prefer a generated `review-file` packet containing the exact diff/files/question when the scope needs plan context or hand-picked snippets.
 2. Submit in background.
 3. Run one patient, bounded wait: `await <run-id> --interval 30 --max-minutes 25 --claude-idle-seconds 420`.
 4. If done, call `result <run-id>` once.
@@ -90,9 +93,9 @@ Use `await` for long jobs. It waits inside one local Node process by reading `st
 
 Review, grill, and explore jobs all use Claude `stream-json`. For progress, inspect `status <run-id>` fields such as `lastClaudeEventAt`, `claudeEventCount`, `toolUseCount`, and `resultReady`; use `tail` only for raw stdout/stderr diagnostics.
 
-Prefer `review-working-tree` for small, clean code reviews: it includes `git status`, unstaged diff, staged diff, and small safe untracked text files. Use `review-diff` only when you deliberately want unstaged `git diff` scope. For large or messy diffs, prepare a concise packet and use `review-file` so Claude sees only the relevant files, invariants, and questions. Review commands deliberately reject bare `--wait` to avoid tying up a Codex tool call while Claude reviews large diffs. Use `submit -> bounded await -> result`. Only use `--wait --wait-ok` for tiny local smoke tests.
+Prefer `review-working-tree` for small, clean code reviews: it includes `git status`, unstaged diff, staged diff, and small safe untracked text files. Use `review-commit HEAD` after a change is already committed; pass `--base <ref>` for a branch/range review. Use `review-diff` only when you deliberately want unstaged `git diff` scope. For large or messy diffs, prepare a concise packet and use `review-file` so Claude sees only the relevant files, invariants, and questions. A `review-file` packet that asks Claude to inspect `git diff`, `git show`, `HEAD^..HEAD`, or a commit must embed the unified diff in a fenced `diff` block; otherwise the runner rejects it. Review commands deliberately reject bare `--wait` to avoid tying up a Codex tool call while Claude reviews large diffs. Use `submit -> bounded await -> result`. Only use `--wait --wait-ok` for tiny local smoke tests.
 
-If a review/explore job times out or goes idle while still `running`, do not keep saying “still running” in chat, but also do not kill it automatically. Before the first 25-minute await completes, a healthy `running` process must keep running. After that window, inspect `status`: if `lastClaudeEventAt` is stale and `claudeEventCount` is not growing, decide between one more patient await, `tail` diagnostics, or explicit `cancel`. Common fixes for the next run are: use `review-file` on a generated review packet instead of broad `explore`; cap the packet to critical files; ask for top blockers only; avoid asking Claude to infer implementation status from an unbounded working tree.
+If a review/explore job times out or goes idle while still `running`, do not keep saying “still running” in chat, but also do not kill it automatically. Before the first 25-minute await completes, a healthy `running` process must keep running. After that window, inspect `status`: if `lastClaudeEventAt` is stale and `claudeEventCount` is not growing, decide between one more patient await, `tail` diagnostics, or explicit `cancel`. Common fixes for the next run are: use `review-commit` for committed work; use `review-file` on a generated review packet instead of broad `explore`; cap the packet to critical files; ask for top blockers only; avoid asking Claude to infer implementation status from an unbounded working tree.
 
 ## Review Results Are Inputs
 
