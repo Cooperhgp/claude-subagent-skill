@@ -7,6 +7,9 @@ import { spawn, spawnSync } from 'node:child_process';
 import test from 'node:test';
 
 const scriptPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'claude-agent.mjs');
+const skillPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'SKILL.md');
+const readmePath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'README.md');
+const readmeZhPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'README.zh-CN.md');
 const nodeBin = process.execPath;
 
 function makeTempWorkspace() {
@@ -64,13 +67,53 @@ test('rejects path-traversal run ids', () => {
   assert.match(result.stderr, /Invalid run id/);
 });
 
+test('skill instructs Codex to stay quiet while awaiting Claude', () => {
+  const skill = fs.readFileSync(skillPath, 'utf8');
+
+  assert.match(skill, /Silent Await Policy/);
+  assert.match(skill, /submit, terminal result, or actionable exception/);
+  assert.match(skill, /Do not narrate periodic waiting updates/);
+  assert.match(skill, /not a user-facing event/);
+});
+
+test('skill forbids cancelling a healthy Claude run before the first 25 minute wait completes', () => {
+  const skill = fs.readFileSync(skillPath, 'utf8');
+
+  assert.match(skill, /Minimum Patience Rule/);
+  assert.match(skill, /Do not cancel/);
+  assert.match(skill, /first 25-minute await/);
+  assert.match(skill, /`status` is `running`/);
+  assert.match(skill, /heartbeat or Claude event counters are moving/);
+});
+
+test('usage does not imply review commands support bare wait', () => {
+  const result = runAgent(makeTempWorkspace(), []);
+
+  assert.equal(result.status, 2);
+  assert.equal(result.stderr.includes('submit review-diff [--wait]'), false);
+  assert.equal(result.stderr.includes('submit review-working-tree [--wait]'), false);
+  assert.equal(result.stderr.includes('submit review-file <path> [--wait]'), false);
+  assert.equal(result.stderr.includes('submit review-plan <path> [--wait]'), false);
+  assert.ok(result.stderr.includes('submit review-diff|review-working-tree|review-file|review-plan [--wait-ok] [--no-persist]'));
+});
+
+test('README documents Claude idle await configuration', () => {
+  const readme = fs.readFileSync(readmePath, 'utf8');
+  const readmeZh = fs.readFileSync(readmeZhPath, 'utf8');
+
+  assert.match(readme, /CLAUDE_AGENT_CLAUDE_IDLE_SECONDS/);
+  assert.match(readme, /No Claude stream events/);
+  assert.match(readmeZh, /CLAUDE_AGENT_CLAUDE_IDLE_SECONDS/);
+  assert.match(readmeZh, /Claude stream event/);
+});
+
 test('doctor verifies Claude CLI help, cwd, runs root, and tool allowlist', () => {
   const workspace = makeTempWorkspace();
   const fakeClaude = writeFakeClaude(
     workspace,
     `
 if (process.argv.includes('--help')) {
-  process.stdout.write('--output-format stream-json --include-partial-messages --verbose --allowedTools --tools --session-id --no-session-persistence --disable-slash-commands --disallowedTools\\n');
+  process.stdout.write('--output-format stream-json --include-partial-messages --verbose --allowedTools --tools --session-id --resume --no-session-persistence --disable-slash-commands --disallowedTools\\n');
   process.exit(0);
 }
 process.exit(7);
@@ -122,6 +165,103 @@ setTimeout(() => {}, 300);
   assert.match(result.stdout, /status: done/);
   assert.match(result.stdout, /resultReady: true/);
   assert.doesNotMatch(result.stdout, /final answer/);
+});
+
+test('await prints Claude progress fields when a run goes idle', () => {
+  const workspace = makeTempWorkspace();
+  const runId = '20260624120000-explore-idle01';
+  const runDir = makeRun(workspace, runId, {
+    pid: 999999,
+    workerPid: 999998,
+    claudePid: 999997,
+    lastClaudeEventAt: new Date(Date.now() - 10_000).toISOString(),
+    lastClaudeEventType: 'text_delta',
+    claudeEventCount: 12,
+    toolUseCount: 2,
+  });
+
+  const result = runAgent(workspace, [
+    'await',
+    runId,
+    '--interval',
+    '0.01',
+    '--max-minutes',
+    '0.01',
+    '--claude-idle-seconds',
+    '0.001',
+    '--cancel-on-idle',
+  ]);
+
+  assert.equal(result.status, 124);
+  assert.match(result.stderr, /No Claude stream events/);
+  assert.match(result.stdout, /status: cancelled/);
+  assert.match(result.stdout, /lastClaudeEventType: text_delta/);
+  assert.match(result.stdout, /claudeEventCount: 12/);
+  assert.match(result.stdout, /toolUseCount: 2/);
+  const status = JSON.parse(fs.readFileSync(path.join(runDir, 'status.json'), 'utf8'));
+  assert.equal(status.status, 'cancelled');
+});
+
+test('await idle detection does not cancel Claude unless explicitly requested', () => {
+  const workspace = makeTempWorkspace();
+  const runId = '20260624120000-explore-idle02';
+  const runDir = makeRun(workspace, runId, {
+    pid: 999999,
+    workerPid: 999998,
+    claudePid: 999997,
+    lastClaudeEventAt: new Date(Date.now() - 10_000).toISOString(),
+    lastClaudeEventType: 'message_start',
+    claudeEventCount: 1,
+  });
+
+  const result = runAgent(workspace, [
+    'await',
+    runId,
+    '--interval',
+    '0.01',
+    '--max-minutes',
+    '0.01',
+    '--claude-idle-seconds',
+    '0.001',
+  ]);
+
+  assert.equal(result.status, 124);
+  assert.match(result.stderr, /No Claude stream events/);
+  assert.match(result.stdout, /status: running/);
+  assert.match(result.stdout, /lastClaudeEventType: message_start/);
+  const status = JSON.parse(fs.readFileSync(path.join(runDir, 'status.json'), 'utf8'));
+  assert.equal(status.status, 'running');
+});
+
+test('await can cancel a run when the wall-clock budget expires', () => {
+  const workspace = makeTempWorkspace();
+  const runId = '20260624120000-explore-time01';
+  const runDir = makeRun(workspace, runId, {
+    pid: 999999,
+    workerPid: 999998,
+    claudePid: 999997,
+    lastClaudeEventAt: new Date().toISOString(),
+    lastClaudeEventType: 'message_start',
+    claudeEventCount: 1,
+  });
+
+  const result = runAgent(workspace, [
+    'await',
+    runId,
+    '--interval',
+    '0.01',
+    '--max-minutes',
+    '0.001',
+    '--cancel-on-timeout',
+  ]);
+
+  assert.equal(result.status, 124);
+  assert.match(result.stderr, /Timed out waiting for run/);
+  assert.match(result.stdout, /status: cancelled/);
+  assert.match(result.stdout, /cancelReason: Timed out waiting/);
+  const status = JSON.parse(fs.readFileSync(path.join(runDir, 'status.json'), 'utf8'));
+  assert.equal(status.status, 'cancelled');
+  assert.match(fs.readFileSync(path.join(runDir, 'events.jsonl'), 'utf8'), /"type":"await_cancelled"/);
 });
 
 test('rejects review-file targets outside the current working directory', () => {
@@ -353,6 +493,73 @@ process.stdin.on('end', () => {
   assert.match(request, /--- binary\.bin ---\n\[omitted: binary file\]/);
 });
 
+test('review requests demand concise blocker-first output', () => {
+  const workspace = makeTempWorkspace();
+  const target = path.join(workspace, 'target.md');
+  fs.writeFileSync(target, '# Target\n\ncontent\n', 'utf8');
+  const fakeClaude = writeFakeClaude(
+    workspace,
+    `
+process.stdin.resume();
+process.stdin.on('end', () => {
+  process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'OK\\\\n', session_id: 'concise-review-session' }) + '\\n');
+});
+`,
+  );
+
+  const submit = runAgent(workspace, ['submit', 'review-file', target, '--wait', '--wait-ok'], {
+    CLAUDE_AGENT_CLAUDE_BIN: fakeClaude,
+  });
+  assert.equal(submit.status, 0, submit.stderr);
+
+  const runId = firstRunId(workspace);
+  const request = fs.readFileSync(path.join(workspace, '.claude-runs', runId, 'request.md'), 'utf8');
+  assert.match(request, /短平快/);
+  assert.match(request, /最多 3 条/);
+  assert.match(request, /每条最多 2 行/);
+  assert.match(request, /不要长篇展开/);
+  assert.match(request, /只输出阻塞项/);
+});
+
+test('review requests frame Claude output as Codex-consumed review signals', () => {
+  const workspace = makeTempWorkspace();
+  const target = path.join(workspace, 'target.md');
+  fs.writeFileSync(target, '# Target\n\ncontent\n', 'utf8');
+  const fakeClaude = writeFakeClaude(
+    workspace,
+    `
+process.stdin.resume();
+process.stdin.on('end', () => {
+  process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'OK\\\\n', session_id: 'review-signal-session' }) + '\\n');
+});
+`,
+  );
+
+  const submit = runAgent(workspace, ['submit', 'review-file', target, '--wait', '--wait-ok'], {
+    CLAUDE_AGENT_CLAUDE_BIN: fakeClaude,
+  });
+  assert.equal(submit.status, 0, submit.stderr);
+
+  const runId = firstRunId(workspace);
+  const request = fs.readFileSync(path.join(workspace, '.claude-runs', runId, 'request.md'), 'utf8');
+  assert.match(request, /给 Codex 消费的中间审查信号/);
+  assert.match(request, /不要写成给最终用户的结论/);
+  assert.match(request, /clearly_actionable/);
+  assert.match(request, /needs_user_decision/);
+  assert.match(request, /uncertain/);
+});
+
+test('skill requires Codex to triage Claude review results before user-facing output', () => {
+  const skill = fs.readFileSync(skillPath, 'utf8');
+
+  assert.match(skill, /Review Results Are Inputs/);
+  assert.match(skill, /accepted/);
+  assert.match(skill, /rejected/);
+  assert.match(skill, /needs_user_decision/);
+  assert.match(skill, /deferred/);
+  assert.match(skill, /Do not paste raw Claude output/);
+});
+
 test('review commands reject bare --wait to avoid blocking Codex tool calls', () => {
   const workspace = makeTempWorkspace();
   spawnSync('git', ['init', '-q'], { cwd: workspace, encoding: 'utf8' });
@@ -555,8 +762,9 @@ process.stdin.on('end', () => {
   const argLines = fs.readFileSync(argsLog, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
   assert.equal(argLines.length, 2);
   const firstSessionIndex = argLines[0].indexOf('--session-id');
-  const secondSessionIndex = argLines[1].indexOf('--session-id');
+  const secondResumeIndex = argLines[1].indexOf('--resume');
   assert.ok(firstSessionIndex >= 0, 'round 1 should set --session-id');
-  assert.ok(secondSessionIndex >= 0, 'round 2 should set --session-id');
-  assert.equal(argLines[1][secondSessionIndex + 1], argLines[0][firstSessionIndex + 1]);
+  assert.ok(secondResumeIndex >= 0, 'round 2 should resume the prior Claude conversation');
+  assert.equal(argLines[1][secondResumeIndex + 1], argLines[0][firstSessionIndex + 1]);
+  assert.equal(argLines[1].indexOf('--session-id'), -1, 'round 2 should not claim an already-created session id');
 });

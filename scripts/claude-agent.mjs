@@ -21,14 +21,15 @@ const DEFAULT_DISALLOWED_TOOLS = 'Skill';
 const MAX_CAPTURE_CHARS = 1_000_000;
 const DEFAULT_UNTRACKED_MAX_BYTES = 64 * 1024;
 const DEFAULT_STDOUT_LOG_MAX_BYTES = 1 * 1024 * 1024;
+const DEFAULT_CLAUDE_IDLE_SECONDS = 0;
 let activeCwd = fs.realpathSync(process.cwd());
 
 function usage(exitCode = 2) {
   const text = `Usage:
-  claude-agent.mjs --cwd <project-dir> submit review-diff [--wait]
-  claude-agent.mjs --cwd <project-dir> submit review-working-tree [--wait]
-  claude-agent.mjs --cwd <project-dir> submit review-file <path> [--wait]
-  claude-agent.mjs --cwd <project-dir> submit review-plan <path> [--wait]
+  claude-agent.mjs --cwd <project-dir> submit review-diff [--wait-ok] [--no-persist]
+  claude-agent.mjs --cwd <project-dir> submit review-working-tree [--wait-ok] [--no-persist]
+  claude-agent.mjs --cwd <project-dir> submit review-file <path> [--wait-ok] [--no-persist]
+  claude-agent.mjs --cwd <project-dir> submit review-plan <path> [--wait-ok] [--no-persist]
   claude-agent.mjs --cwd <project-dir> submit grill-diff [--log <path>] [--round N] [--claude-session-id UUID|--resume-from RUN_ID] [--wait]
   claude-agent.mjs --cwd <project-dir> submit grill-plan <path> [--log <path>] [--round N] [--claude-session-id UUID|--resume-from RUN_ID] [--wait]
   claude-agent.mjs --cwd <project-dir> submit debate-diff [--log <path>] [--round N] [--claude-session-id UUID|--resume-from RUN_ID] [--wait]
@@ -40,7 +41,7 @@ function usage(exitCode = 2) {
   claude-agent.mjs --cwd <project-dir> verdict <run-id>
   claude-agent.mjs --cwd <project-dir> tail <run-id> [--lines N]
   claude-agent.mjs --cwd <project-dir> list
-  claude-agent.mjs --cwd <project-dir> await <run-id> [--interval seconds] [--max-minutes minutes] [--stale-seconds seconds]
+  claude-agent.mjs --cwd <project-dir> await <run-id> [--interval seconds] [--max-minutes minutes] [--stale-seconds seconds] [--claude-idle-seconds seconds] [--cancel-on-idle] [--cancel-on-timeout]
   claude-agent.mjs --cwd <project-dir> cancel <run-id>
   claude-agent.mjs --cwd <project-dir> doctor [--json]
 
@@ -53,6 +54,7 @@ Environment:
   CLAUDE_AGENT_NO_SESSION_PERSISTENCE  Set to 1/true/yes/on to opt out of Claude local session history for review/explore
   CLAUDE_AGENT_UNTRACKED_MAX_BYTES  Max bytes per untracked text file in review-working-tree
   CLAUDE_AGENT_STDOUT_LOG_MAX_BYTES Max raw stdout.log bytes before truncation
+  CLAUDE_AGENT_CLAUDE_IDLE_SECONDS Max seconds without Claude stream events before await returns non-zero (default: disabled)
 `;
   process.stderr.write(text);
   process.exit(exitCode);
@@ -195,6 +197,26 @@ function optionNumber(args, name, fallback) {
   return parsed;
 }
 
+function optionNumberFromEnv(args, optionName, envName, fallback) {
+  const rawOption = optionValue(args, optionName);
+  if (rawOption !== null && rawOption !== undefined) {
+    return optionNumber(args, optionName, fallback);
+  }
+  const rawEnv = process.env[envName];
+  if (rawEnv === undefined || rawEnv === '') {
+    return fallback;
+  }
+  const parsed = Number.parseFloat(rawEnv);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`${envName} must be a non-negative number`);
+  }
+  return parsed;
+}
+
+function hasOption(args, name) {
+  return args.includes(name);
+}
+
 function envPositiveInteger(name, fallback) {
   const raw = process.env[name];
   if (raw === undefined || raw === '') {
@@ -223,6 +245,21 @@ function numberLines(content) {
     .join('\n');
 }
 
+function conciseReviewOutputRules(extraRules = []) {
+  return [
+    '输出要求（短平快，blocker-first）：',
+    '1. 第一行只写：VERDICT: BLOCKED / OK / UNSURE。',
+    '2. 只输出阻塞项或高置信真实问题；最多 3 条。',
+    '3. 每条最多 2 行：`- [等级] 文件:行 — 问题；建议动作`。',
+    '4. 必须带最小证据（文件路径/行号/片段关键词），不要长篇展开。',
+    '5. 你的输出是给 Codex 消费的中间审查信号，不要写成给最终用户的结论。',
+    '6. 每条发现标注 triage_hint：clearly_actionable / needs_user_decision / uncertain。',
+    '7. 不要复述需求、不要总结优点、不要列低价值建议。',
+    '8. 如果未发现阻塞项，只写两行：`VERDICT: OK` 和 `未发现明显阻塞项`。',
+    ...extraRules,
+  ];
+}
+
 function buildRequest(kind, payload) {
   if (kind === 'review-diff') {
     const diff = payload.diff || '(当前没有 git diff 输出)';
@@ -231,11 +268,7 @@ function buildRequest(kind, payload) {
       '',
       '任务：评审当前 git diff。',
       '',
-      '输出要求：',
-      '1. 先给总评：是否建议继续推进。',
-      '2. 只列真实风险，按 Critical / High / Medium / Low 分级。',
-      '3. 每条尽量引用文件路径和相关片段。',
-      '4. 如果未发现明显问题，明确说明“未发现明显问题”。',
+      ...conciseReviewOutputRules(),
       '',
       'git diff：',
       '',
@@ -249,12 +282,9 @@ function buildRequest(kind, payload) {
       '',
       '任务：评审当前完整工作区改动，包括 Git status、unstaged diff、staged diff、以及可安全读取的 untracked 文本文件。',
       '',
-      '输出要求：',
-      '1. 先给总评：是否建议继续推进。',
-      '2. 只列真实风险，按 Critical / High / Medium / Low 分级。',
-      '3. 每条尽量引用文件路径和相关片段。',
-      '4. 特别留意 staged/unstaged/untracked 之间的不一致、漏提交文件、生成物或临时文件。',
-      '5. 如果未发现明显问题，明确说明“未发现明显问题”。',
+      ...conciseReviewOutputRules([
+        '7. 特别留意 staged/unstaged/untracked 之间的不一致、漏提交文件、生成物或临时文件。',
+      ]),
       '',
       'Git status:',
       '',
@@ -280,11 +310,7 @@ function buildRequest(kind, payload) {
       '',
       `目标文件：${payload.path}`,
       '',
-      '输出要求：',
-      '1. 先给总评：是否建议采纳/继续推进。',
-      '2. 只列真实风险，按 Critical / High / Medium / Low 分级。',
-      '3. 每条都尽量引用具体行号。',
-      '4. 如果未发现明显问题，明确说明“未发现明显问题”。',
+      ...conciseReviewOutputRules(),
       '',
       '文件内容：',
       '',
@@ -298,12 +324,9 @@ function buildRequest(kind, payload) {
       '',
       `目标方案：${payload.path}`,
       '',
-      '输出要求：',
-      '1. 先给总评：是否建议采纳/继续推进。',
-      '2. 只列真实风险，按 Critical / High / Medium / Low 分级。',
-      '3. 重点检查架构边界、迁移风险、回滚/验证缺口、与现有系统约束的冲突。',
-      '4. 每条都尽量引用具体行号。',
-      '5. 如果未发现明显问题，明确说明“未发现明显问题”。',
+      ...conciseReviewOutputRules([
+        '7. 重点检查架构边界、迁移风险、回滚/验证缺口、与现有系统约束的冲突。',
+      ]),
       '',
       '方案内容：',
       '',
@@ -440,7 +463,10 @@ function claudeInvocationFor(kind, payload = {}) {
   if (isGrillKind(kind)) {
     const round = payload.round || 1;
     const claudeSessionId = payload.claudeSessionId || crypto.randomUUID();
-    const sessionArgs = ['--session-id', claudeSessionId];
+    const isResume = Boolean(payload.resumeFrom || round > 1 || payload.claudeSessionId);
+    const sessionArgs = isResume
+      ? ['--resume', claudeSessionId]
+      : ['--session-id', claudeSessionId];
     return {
       args: streamJsonArgs([
         ...sessionArgs,
@@ -450,7 +476,7 @@ function claudeInvocationFor(kind, payload = {}) {
       claudeSessionId,
       continuity: 'same-session',
       sessionPersistence: 'enabled',
-      sessionMode: payload.resumeFrom || round > 1 || payload.claudeSessionId ? 'resume' : 'start',
+      sessionMode: isResume ? 'resume' : 'start',
       resumeFrom: payload.resumeFrom,
       round,
     };
@@ -748,10 +774,6 @@ function createRun(kind, request) {
 function hasStreamJsonOutput(args) {
   const outputFormatIndex = args.indexOf('--output-format');
   return outputFormatIndex >= 0 && args[outputFormatIndex + 1] === 'stream-json';
-}
-
-function normalizeStreamSeparators(text) {
-  return text;
 }
 
 function splitConcatenatedJsonRecords(text) {
@@ -1360,6 +1382,12 @@ function printAwaitSummary(status) {
     ['exitCode', status.exitCode],
     ['verdict', status.verdict],
     ['result', status.result],
+    ['lastClaudeEventAt', status.lastClaudeEventAt],
+    ['lastClaudeEventType', status.lastClaudeEventType],
+    ['claudeEventCount', status.claudeEventCount],
+    ['toolUseCount', status.toolUseCount],
+    ['heartbeatAt', status.heartbeatAt],
+    ['cancelReason', status.cancelReason],
     ['updatedAt', status.updatedAt],
     ['finishedAt', status.finishedAt],
   ];
@@ -1379,11 +1407,55 @@ function readStatusForAwait(runId) {
   return readJson(statusPath);
 }
 
+function signalProcess(pid, signal = 'SIGTERM') {
+  const numericPid = Number(pid || 0);
+  if (!Number.isInteger(numericPid) || numericPid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(numericPid, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function cancelRunFromAwait(runId, status, reason) {
+  const runDir = runDirFor(runId);
+  const killed = [
+    ['claudePid', status.claudePid],
+    ['pid', status.pid],
+    ['workerPid', status.workerPid],
+  ]
+    .map(([name, pid]) => ({ name, pid, signalled: signalProcess(pid) }))
+    .filter((entry) => entry.pid);
+  updateStatus(runDir, {
+    status: 'cancelled',
+    cancelledAt: nowIso(),
+    cancelReason: reason,
+    resultReady: false,
+  });
+  appendEvent(runDir, {
+    type: 'await_cancelled',
+    reason,
+    killed,
+  });
+  return killed;
+}
+
 async function awaitRun(runId, args) {
   if (!runId) usage();
   const intervalSeconds = optionNumber(args, '--interval', 30);
   const maxMinutes = optionNumber(args, '--max-minutes', 30);
   const staleSeconds = optionNumber(args, '--stale-seconds', 300);
+  const claudeIdleSeconds = optionNumberFromEnv(
+    args,
+    '--claude-idle-seconds',
+    'CLAUDE_AGENT_CLAUDE_IDLE_SECONDS',
+    DEFAULT_CLAUDE_IDLE_SECONDS,
+  );
+  const cancelOnIdle = hasOption(args, '--cancel-on-idle');
+  const cancelOnTimeout = hasOption(args, '--cancel-on-timeout');
   const deadline = Date.now() + maxMinutes * 60_000;
   let lastStatus = null;
 
@@ -1406,10 +1478,32 @@ async function awaitRun(runId, args) {
       return;
     }
 
+    const lastClaudeEvent = timestampMs(lastStatus.lastClaudeEventAt);
+    const claudeIdle = claudeIdleSeconds > 0 && lastClaudeEvent
+      ? Date.now() - lastClaudeEvent > claudeIdleSeconds * 1000
+      : false;
+    if (claudeIdle) {
+      const idleForSeconds = Math.round((Date.now() - lastClaudeEvent) / 1000);
+      const reason = `No Claude stream events for ${idleForSeconds}s (lastClaudeEventType=${lastStatus.lastClaudeEventType || 'n/a'})`;
+      process.stderr.write(`${reason}\n`);
+      if (cancelOnIdle) {
+        cancelRunFromAwait(runId, lastStatus, reason);
+        lastStatus = readStatusForAwait(runId);
+      }
+      printAwaitSummary(lastStatus);
+      process.exitCode = 124;
+      return;
+    }
+
     await sleep(intervalSeconds * 1000);
   }
 
-  process.stderr.write(`Timed out waiting for run: ${runId}\n`);
+  const timeoutReason = `Timed out waiting for run: ${runId}`;
+  process.stderr.write(`${timeoutReason}\n`);
+  if (lastStatus && cancelOnTimeout && !terminalStatus(lastStatus.status)) {
+    cancelRunFromAwait(runId, lastStatus, timeoutReason);
+    lastStatus = readStatusForAwait(runId);
+  }
   if (lastStatus) {
     printAwaitSummary(lastStatus);
   }
@@ -1459,6 +1553,7 @@ function doctorClaudeHelpDetail() {
     '--allowedTools',
     '--tools',
     '--session-id',
+    '--resume',
     '--no-session-persistence',
     '--disable-slash-commands',
     '--disallowedTools',

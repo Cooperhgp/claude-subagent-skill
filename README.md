@@ -59,9 +59,11 @@ SCRIPT="$HOME/.agents/skills/claude-subagent/scripts/claude-agent.mjs"
 node "$SCRIPT" --cwd /path/to/project doctor
 
 node "$SCRIPT" --cwd /path/to/project submit review-working-tree
-node "$SCRIPT" --cwd /path/to/project await <run-id>
+node "$SCRIPT" --cwd /path/to/project await <run-id> --interval 30 --max-minutes 25 --claude-idle-seconds 420
 node "$SCRIPT" --cwd /path/to/project result <run-id>
 ```
+
+For large/noisy working trees, create a concise review packet and use `review-file` instead of repeatedly waiting on a broad review. If bounded `await` reports idle/timeout while the run is still `running`, inspect `status`/`tail` first; cancel only when you intentionally want to stop Claude.
 
 ## Common commands
 
@@ -82,6 +84,7 @@ node "$SCRIPT" --cwd /path/to/project submit grill-plan plan.md --round 2 --resu
 # Inspect
 node "$SCRIPT" --cwd /path/to/project list
 node "$SCRIPT" --cwd /path/to/project status <run-id>
+node "$SCRIPT" --cwd /path/to/project await <run-id> --interval 30 --max-minutes 25 --claude-idle-seconds 420
 node "$SCRIPT" --cwd /path/to/project tail <run-id> --lines 80
 node "$SCRIPT" --cwd /path/to/project verdict <run-id>
 
@@ -107,6 +110,7 @@ Environment variables:
 | `CLAUDE_AGENT_NO_SESSION_PERSISTENCE` | unset | Set to `1`, `true`, `yes`, or `on` to opt out of Claude local history for review/explore. |
 | `CLAUDE_AGENT_UNTRACKED_MAX_BYTES` | `65536` | Max bytes per untracked text file in `review-working-tree`. |
 | `CLAUDE_AGENT_STDOUT_LOG_MAX_BYTES` | `1048576` | Max raw `stdout.log` bytes before truncation. |
+| `CLAUDE_AGENT_CLAUDE_IDLE_SECONDS` | unset | Seconds without Claude stream events before `await` returns non-zero with `No Claude stream events`. |
 
 ## Safety model
 

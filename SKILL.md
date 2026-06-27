@@ -55,7 +55,7 @@ Inspect jobs:
 ```bash
 node "$SCRIPT" --cwd /path/to/project list
 node "$SCRIPT" --cwd /path/to/project status <run-id>
-node "$SCRIPT" --cwd /path/to/project await <run-id> --interval 30 --max-minutes 20
+node "$SCRIPT" --cwd /path/to/project await <run-id> --interval 30 --max-minutes 25 --claude-idle-seconds 420
 node "$SCRIPT" --cwd /path/to/project result <run-id>
 node "$SCRIPT" --cwd /path/to/project verdict <run-id>
 node "$SCRIPT" --cwd /path/to/project tail <run-id> --lines 80
@@ -64,11 +64,54 @@ node "$SCRIPT" --cwd /path/to/project cancel <run-id>
 
 Use `doctor` before the first run or after changing Claude/Codex configuration. It is read-only and verifies the local Node runtime, Claude CLI help flags, `cwd`, runs-root symlink safety, and read-tool allowlist.
 
-Use `await` for long jobs. It waits inside one local Node process by reading `status.json`; it does not ask Codex/Claude for progress and does not print the full result body. After `await` returns `status: done`, call `result <run-id>` once.
+## Fast Review Policy
+
+Claude review should be bounded. Do not let Codex narrate repeated “still running” updates while waiting for the same run.
+
+Review output should also be short. The runner tells Claude to return only `VERDICT: BLOCKED / OK / UNSURE` plus at most 3 high-confidence blockers, each at most 2 lines with minimal evidence. Do not ask Claude for comprehensive essays unless the user explicitly requests deep review.
+
+## Silent Await Policy
+
+While a Claude job is awaiting, Codex should stay quiet to avoid wasting tokens. Speak only at these user-facing checkpoints: submit, terminal result, or actionable exception. Do not narrate periodic waiting updates such as “still running”, “waiting again”, or “no output yet”. A routine `await` loop/status poll is not a user-facing event. If a long wait is expected, say once that the job is queued and bounded, then wait silently until the command returns.
+
+## Minimum Patience Rule
+
+Do not cancel, shrink, or resubmit a Claude job before the first 25-minute await finishes when `status` is `running` and heartbeat or Claude event counters are moving. Idle text output is not failure. Only cancel before 25 minutes when the process is gone, `status` is terminal/error, or the user explicitly asks to stop it.
+
+Default fast path:
+
+1. Scope first: prefer a generated `review-file` packet containing the exact diff/files/question over broad `review-working-tree` when the working tree is large, noisy, or includes unrelated user changes.
+2. Submit in background.
+3. Run one patient, bounded wait: `await <run-id> --interval 30 --max-minutes 25 --claude-idle-seconds 420`.
+4. If done, call `result <run-id>` once.
+5. If idle/timeout returns while status is still `running`, do not immediately kill Claude. If the first 25-minute await has not completed and heartbeat/events are moving, continue waiting silently. After the first 25-minute await, inspect `status`/`tail`; either wait one more bounded window, or explicitly `cancel` only when the user is blocked and the stream is clearly stale.
+
+Use `await` for long jobs. It waits inside one local Node process by reading `status.json`; it does not ask Codex/Claude for progress and does not print the full result body. For review/explore jobs, include `--claude-idle-seconds 420` so Codex can surface a stale stream, but do not include `--cancel-on-idle` or `--cancel-on-timeout` by default. Add those cancel flags only when you intentionally want to stop Claude. After `await` returns `status: done`, call `result <run-id>` once.
 
 Review, grill, and explore jobs all use Claude `stream-json`. For progress, inspect `status <run-id>` fields such as `lastClaudeEventAt`, `claudeEventCount`, `toolUseCount`, and `resultReady`; use `tail` only for raw stdout/stderr diagnostics.
 
-Prefer `review-working-tree` for code review: it includes `git status`, unstaged diff, staged diff, and small safe untracked text files. Use `review-diff` only when you deliberately want unstaged `git diff` scope. Review commands deliberately reject bare `--wait` to avoid tying up a Codex tool call while Claude reviews large diffs. Use `submit -> await -> result`. Only use `--wait --wait-ok` for tiny local smoke tests.
+Prefer `review-working-tree` for small, clean code reviews: it includes `git status`, unstaged diff, staged diff, and small safe untracked text files. Use `review-diff` only when you deliberately want unstaged `git diff` scope. For large or messy diffs, prepare a concise packet and use `review-file` so Claude sees only the relevant files, invariants, and questions. Review commands deliberately reject bare `--wait` to avoid tying up a Codex tool call while Claude reviews large diffs. Use `submit -> bounded await -> result`. Only use `--wait --wait-ok` for tiny local smoke tests.
+
+If a review/explore job times out or goes idle while still `running`, do not keep saying “still running” in chat, but also do not kill it automatically. Before the first 25-minute await completes, a healthy `running` process must keep running. After that window, inspect `status`: if `lastClaudeEventAt` is stale and `claudeEventCount` is not growing, decide between one more patient await, `tail` diagnostics, or explicit `cancel`. Common fixes for the next run are: use `review-file` on a generated review packet instead of broad `explore`; cap the packet to critical files; ask for top blockers only; avoid asking Claude to infer implementation status from an unbounded working tree.
+
+## Review Results Are Inputs
+
+Claude review output is for Codex to consume, not a final user-facing answer. Do not paste raw Claude output as the conclusion. Codex must read each finding, verify it against source/tests, then report a triage:
+
+- `accepted`: verified as real and in scope; fix it, then run the smallest relevant check.
+- `rejected`: contradicted by source, tests, project rules, or current scope; explain the technical reason.
+- `needs_user_decision`: product behavior, UX preference, public API, auth/billing/permission, migration, destructive data, production deploy, secrets, or architecture tradeoff; ask the user before changing.
+- `deferred`: plausible but non-blocking or outside the current request; do not expand scope silently.
+
+## Post-Review Handling
+
+After reading a Claude review result, Codex should triage findings before replying to the user:
+
+- `clearly actionable`: high-confidence bugs or regressions that are directly supported by the diff/source/tests, such as failing checks, type errors, null/undefined crashes, broken imports, ownership/auth leaks, data isolation violations, resource leaks, missing error handling on an already-required path, or explicit project invariant violations. Codex may fix these directly without asking the user for a second confirmation, then run the smallest relevant verification.
+- `needs user decision`: product behavior changes, UI/UX preference calls, broad architecture rewrites, public API contract changes, auth/billing/permission model changes, migrations, destructive data operations, production deploys, secrets, or anything whose correct answer depends on business intent. Ask the user before changing these.
+- `uncertain/disagree`: findings that are speculative, stale, contradicted by source, outside scope, or materially expensive/risky relative to the current task. Do not blindly apply them; verify source facts and either explain why they are not being changed or ask a focused question.
+
+Default behavior after a review is: fix `clearly actionable` issues, skip or ask about the rest, and report which Claude suggestions were accepted, rejected, or deferred. Claude output is evidence, not authority; Codex remains responsible for source verification, code changes, and final checks.
 
 ## Same-Session Grill
 
@@ -96,7 +139,7 @@ node "$SCRIPT" --cwd /path/to/project submit grill-plan plan.md \
 Rules:
 
 - Prefer `--resume-from <previous-run-id>` so the runner reuses the prior `claudeSessionId`.
-- Use `--claude-session-id <claudeSessionId>` only when manually resuming a known Claude session.
+- Use `--claude-session-id <claudeSessionId>` only when manually resuming a known Claude session; the runner passes it to Claude as `--resume`, not as a fresh `--session-id`.
 - `--round 2+` requires `--resume-from` or `--claude-session-id`; otherwise it is rejected to avoid accidental new-session “resume”.
 - Append each Claude question and Codex response to a review log.
 - Codex decides what to accept/reject, updates the plan/log, then resumes the same Claude session.
@@ -112,5 +155,6 @@ Rules:
 - Inspect `status`, `events.jsonl`, and `tail` for progress instead of assuming a long silent run is stuck; use `cancel <run-id>` to stop a queued/running job.
 - `status.json` records `status`, `workerPid`, `pid`, `claudePid`, `heartbeatAt`, `claudeSessionId`, `resultReady`, event/tool counters, stdout log truncation fields, and final `verdict`.
 - Claude output is a signal, not ground truth. Codex must verify important claims against source/tests before acting.
+- Codex may automatically fix `clearly actionable` review findings as defined above, but must still keep the patch scoped and verified.
 - Do not delegate commit, push, deploy, migration, billing/auth changes, destructive commands, or secret handling to Claude automatically.
-- For review jobs and other long jobs, submit in background, run `await <run-id>` once, then inspect `result`; do not stream/poll continuously in chat. Bare `submit review-* --wait` is rejected; `--wait-ok` is an explicit escape hatch.
+- For review jobs and other long jobs, submit in background, run the full first `await <run-id> --max-minutes 25 --claude-idle-seconds 420`, then inspect `status` or `result`; do not stream/poll continuously in chat. Only add `--cancel-on-idle` / `--cancel-on-timeout` after the first 25-minute await, unless the process is gone, terminal/error, or the user explicitly asks to stop it. Bare `submit review-* --wait` is rejected; `--wait-ok` is an explicit escape hatch.

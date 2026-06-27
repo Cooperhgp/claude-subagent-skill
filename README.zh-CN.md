@@ -67,11 +67,11 @@ SCRIPT="$HOME/.agents/skills/claude-subagent/scripts/claude-agent.mjs"
 node "$SCRIPT" --cwd /path/to/project doctor
 
 node "$SCRIPT" --cwd /path/to/project submit review-working-tree
-node "$SCRIPT" --cwd /path/to/project await <run-id>
+node "$SCRIPT" --cwd /path/to/project await <run-id> --interval 30 --max-minutes 25 --claude-idle-seconds 420
 node "$SCRIPT" --cwd /path/to/project result <run-id>
 ```
 
-推荐用 `review-working-tree` 做代码评审，因为它比 `review-diff` 范围完整：会同时看未暂存、已暂存和小型 untracked 文本文件。
+小而干净的改动推荐用 `review-working-tree`；大 diff、工作区很乱、或只想评审某几处时，先生成一个简短 review packet，再用 `review-file`。如果 bounded `await` 提示 idle/timeout 但任务仍是 `running`，先看 `status`/`tail`；只有明确想停掉 Claude 时才取消。
 
 ## 常用命令
 
@@ -92,6 +92,7 @@ node "$SCRIPT" --cwd /path/to/project submit grill-plan plan.md --round 2 --resu
 # 查看任务
 node "$SCRIPT" --cwd /path/to/project list
 node "$SCRIPT" --cwd /path/to/project status <run-id>
+node "$SCRIPT" --cwd /path/to/project await <run-id> --interval 30 --max-minutes 25 --claude-idle-seconds 420
 node "$SCRIPT" --cwd /path/to/project tail <run-id> --lines 80
 node "$SCRIPT" --cwd /path/to/project verdict <run-id>
 
@@ -123,6 +124,7 @@ review/explore 默认会保留 Claude 本地会话历史。如果某次任务不
 | `CLAUDE_AGENT_NO_SESSION_PERSISTENCE` | 未设置 | 设置为 `1`、`true`、`yes` 或 `on` 时，review/explore 不写入 Claude 本地历史。 |
 | `CLAUDE_AGENT_UNTRACKED_MAX_BYTES` | `65536` | `review-working-tree` 中单个 untracked 文本文件最大读取字节数。 |
 | `CLAUDE_AGENT_STDOUT_LOG_MAX_BYTES` | `1048576` | 原始 `stdout.log` 截断阈值。 |
+| `CLAUDE_AGENT_CLAUDE_IDLE_SECONDS` | 未设置 | Claude stream event 停止增长多少秒后，`await` 以非零状态返回。 |
 
 ## 安全边界
 
